@@ -11,10 +11,9 @@ VERIFY_TOKEN = os.getenv("VERIFY_TOKEN", "inlacademy2025")
 WHATSAPP_TOKEN = os.getenv("WHATSAPP_TOKEN", "")
 WHATSAPP_PHONE_NUMBER_ID = os.getenv("WHATSAPP_PHONE_NUMBER_ID", "")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
-KNOWLEDGE_PATH = os.getenv("KNOWLEDGE_PATH", "./kb.txt")  # Ruta del archivo de base de conocimiento
+KNOWLEDGE_PATH = os.getenv("KNOWLEDGE_PATH", "./kb.txt")
 
-# =============== Estado en memoria (simple) ===============
-# Para evitar saludar varias veces a la misma persona (se reinicia si el proceso se reinicia)
+# =============== Estado en memoria ===============
 _seen_users = set()
 _seen_lock = Lock()
 
@@ -25,8 +24,7 @@ def load_knowledge_base(path: str) -> str:
     try:
         if os.path.exists(path):
             with open(path, "r", encoding="utf-8", errors="ignore") as f:
-                txt = f.read()
-                return txt
+                return f.read()
     except Exception as e:
         print("⚠️ No se pudo leer la base de conocimiento:", e)
     return ""
@@ -35,7 +33,7 @@ knowledge_base = load_knowledge_base(KNOWLEDGE_PATH)
 print(f"📚 KB cargada desde {KNOWLEDGE_PATH}. Longitud: {len(knowledge_base)} chars")
 print("📚 KB preview:", knowledge_base[:400].replace("\n", " ") + ("..." if len(knowledge_base) > 400 else ""))
 
-# =============== Utilidades WhatsApp ===============
+# =============== WhatsApp helpers ===============
 def send_whatsapp_message(to: str, message: str):
     url = f"https://graph.facebook.com/v22.0/{WHATSAPP_PHONE_NUMBER_ID}/messages"
     headers = {
@@ -50,63 +48,47 @@ def send_whatsapp_message(to: str, message: str):
     }
     try:
         resp = requests.post(url, headers=headers, json=payload, timeout=30)
-        print("📤 [WA SEND] status:", resp.status_code, " resp:", resp.text[:600])
+        print("📤 [WA SEND] status:", resp.status_code, " resp:", resp.text[:400])
     except Exception as e:
         print("❌ Error enviando WhatsApp:", e)
 
 def extract_text_from_incoming(msg: dict) -> str:
-    """
-    Extrae texto del mensaje entrante de WhatsApp, contemplando texto plano
-    y respuestas interactivas (botones, listas).
-    """
     # Texto normal
-    text = msg.get("text", {}).get("body")
-    if text:
-        return text
+    txt = msg.get("text", {}).get("body")
+    if txt:
+        return txt
 
-    # Interactivo: botones/listas
+    # Interactivo
     interactive = msg.get("interactive")
     if isinstance(interactive, dict):
-        # Button reply
         btn = interactive.get("button_reply")
-        if btn and isinstance(btn, dict):
+        if btn:
             return btn.get("title") or btn.get("id") or ""
-
-        # List reply
         lst = interactive.get("list_reply")
-        if lst and isinstance(lst, dict):
+        if lst:
             return lst.get("title") or lst.get("id") or ""
 
     return ""
 
-# =============== OpenAI: extracción robusta ===============
-def extract_text_from_openai(response_json: dict):
-    """
-    Soporta:
-    - Formato nuevo: response["output"] -> items con type='message' y dentro content[] con 'text'
-    - Formato antiguo: response["choices"][0]["message"]["content"]
-    - Fallback: response["text"] si llega plano
-    """
-    # 1) Formato nuevo
-    out = response_json.get("output")
+# =============== OpenAI helpers ===============
+def extract_text_from_openai(rj: dict):
+    # Formato nuevo
+    out = rj.get("output")
     if isinstance(out, list):
         for item in out:
             if item.get("type") == "message":
                 for c in item.get("content", []):
-                    if isinstance(c, dict) and isinstance(c.get("text"), str):
+                    if isinstance(c, dict) and c.get("text"):
                         return c["text"]
-
-    # 2) Formato antiguo
-    choices = response_json.get("choices")
+    # Formato antiguo
+    choices = rj.get("choices")
     if isinstance(choices, list) and choices:
         msg = choices[0].get("message", {})
-        if isinstance(msg, dict) and isinstance(msg.get("content"), str):
+        if isinstance(msg, dict) and msg.get("content"):
             return msg["content"]
-
-    # 3) Fallback
-    if isinstance(response_json.get("text"), str):
-        return response_json["text"]
-
+    # Fallback
+    if isinstance(rj.get("text"), str):
+        return rj["text"]
     return None
 
 def generate_ai_response(user_text: str) -> str:
@@ -118,34 +100,41 @@ def generate_ai_response(user_text: str) -> str:
         }
         system_prompt = (
             "Eres el asistente oficial de INL Academy / Algorithmics Valencia. "
-            "Responde siempre en español, con un tono natural, amable y profesional. "
-            "Si el usuario indica una edad o interés, sugiere cursos y horarios adecuados. "
-            "Usa la base de conocimiento si aplica; si no está la respuesta, orienta con opciones y ofrece agendar una llamada."
+            "Responde siempre en español, con tono amable y profesional. "
+            "Si el usuario dice la edad del niño/a, sugiere el curso y el horario más cercano. "
+            "Si no tienes la info exacta, ofrece clase de prueba y teléfonos."
         )
+
         data = {
-            "model": "gpt-5",  # usa "gpt-4o" si no tienes acceso a gpt-5
+            "model": "gpt-5",   # cambia a gpt-4o si lo prefieres
             "input": (
                 f"{system_prompt}\n\n"
-                f"--- BASE DE CONOCIMIENTO (texto libre) ---\n{kb_fragment}\n"
-                "------------------------------------------\n\n"
+                f"--- BASE DE CONOCIMIENTO ---\n{kb_fragment}\n"
+                f"-----------------------------\n"
                 f"Pregunta del usuario: {user_text}\n"
-                "Responde de forma clara y práctica."
-            ),
-            "temperature": 0.5
+                "Responde de forma clara, breve y práctica."
+            )
+            # IMPORTANTE: no ponemos 'temperature' porque tu modelo no lo soporta
         }
-        resp = requests.post("https://api.openai.com/v1/responses", headers=headers, json=data, timeout=30)
+
+        resp = requests.post(
+            "https://api.openai.com/v1/responses",
+            headers=headers,
+            json=data,
+            timeout=30
+        )
         rj = resp.json()
 
         text = extract_text_from_openai(rj)
         if text:
             return text.strip()
 
-        print("⚠️ No pude extraer texto de OpenAI. JSON:", str(rj)[:2000])
-        return ("Estoy teniendo problemas para procesar la respuesta ahora mismo. "
-                "¿Podrías repetir tu consulta con algún detalle extra (por ejemplo, edad y curso de interés)?")
+        print("⚠️ No pude extraer texto de OpenAI. JSON:", str(rj)[:1500])
+        return "He recibido tu mensaje, pero no he podido generar la respuesta ahora mismo. ¿Puedes reformularlo?"
+
     except Exception as e:
         print("❌ Error con OpenAI:", e)
-        return "Ha ocurrido un problema generando la respuesta. Inténtalo de nuevo en un momento, por favor."
+        return "Ha ocurrido un problema generando la respuesta. Inténtalo en un momento, por favor."
 
 # =============== Webhook Meta ===============
 @app.route("/webhook", methods=["GET"])
@@ -162,13 +151,12 @@ def verify_token():
 @app.route("/webhook", methods=["POST"])
 def receive_message():
     data = request.get_json(silent=True) or {}
-    # Ignorar si no hay estructura esperada
     try:
         entry = data.get("entry", [])[0]
         changes = entry.get("changes", [])[0]
         value = changes.get("value", {})
 
-        # Ignorar status updates (no son mensajes de usuario)
+        # Ignorar estados
         if value.get("statuses"):
             return "OK", 200
 
@@ -183,21 +171,20 @@ def receive_message():
 
             text = extract_text_from_incoming(msg).strip()
             if not text:
-                # Nada que responder (puede ser media sin caption, etc.)
                 continue
 
-            # Saludo SOLO la primera vez para ese número
+            # Saludo solo primera vez
             first_time = False
             with _seen_lock:
                 if from_number not in _seen_users:
                     _seen_users.add(from_number)
                     first_time = True
 
+            print("🟢 [IN] Usuario:", from_number, " Texto:", text[:200])
+
             if first_time:
                 send_whatsapp_message(from_number, WELCOME_TEXT)
 
-            # Respuesta IA
-            print("🟢 [IN] Usuario:", from_number, " Texto:", text[:200])
             ai_text = generate_ai_response(text)
             send_whatsapp_message(from_number, ai_text)
 
@@ -212,5 +199,4 @@ def home():
     return "WhatsApp Chatbot activo ✅", 200
 
 if __name__ == "__main__":
-    # Render usa el puerto 10000 por defecto
     app.run(host="0.0.0.0", port=int(os.getenv("PORT", "10000")))
